@@ -12,6 +12,12 @@ use rand::prelude::*;
 use std::fmt;
 
 #[derive(Debug)]
+struct Circle {
+    origin: Vector2D,
+    radius: f64,
+}
+
+#[derive(Debug)]
 struct Vector2D {
     x: f64,
     y: f64,
@@ -34,12 +40,11 @@ impl fmt::Display for Vector2D {
 
 pub struct App {
     gl: GlGraphics, // OpenGL drawing backend.
-    circles: Vec<Vector2D>,
+    circles: Vec<Circle>,
     velocities: Vec<Vector2D>,
     updates: u64,
 }
 
-const CIRCLE_RADIUS: f64 = 10.0;
 const SCREEN_SIZE: f64 = 200.0;
 
 impl App {
@@ -50,7 +55,6 @@ impl App {
         const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 
         let circles = &self.circles;
-        let square = rectangle::square(0.0, 0.0, CIRCLE_RADIUS * 2.0);
 
         self.gl.draw(args.viewport(), |c, gl| {
             clear(WHITE, gl);
@@ -58,10 +62,11 @@ impl App {
             for circle in circles {
                 let transform = c
                     .transform
-                    .trans(circle.x, circle.y)
-                    .trans(-CIRCLE_RADIUS, -CIRCLE_RADIUS);
+                    .trans(circle.origin.x, circle.origin.y)
+                    .trans(-circle.radius, -circle.radius);
 
-                ellipse(RED, square, transform, gl);
+                let circle_box = rectangle::square(0.0, 0.0, circle.radius * 2.0);
+                ellipse(RED, circle_box, transform, gl);
             }
         });
     }
@@ -72,19 +77,19 @@ impl App {
     {
         // Update each circle's position
         for (c, v) in self.circles.iter_mut().zip(&self.velocities) {
-            c.x += v.x * args.dt;
-            c.y += v.y * args.dt;
+            c.origin.x += v.x * args.dt;
+            c.origin.y += v.y * args.dt;
         }
 
         // If we collide with the boundary, change direction
         for (c, v) in self.circles.iter_mut().zip(self.velocities.iter_mut()) {
-            if (c.x + CIRCLE_RADIUS >= SCREEN_SIZE && v.x > 0.0)
-                || (c.x - CIRCLE_RADIUS <= 0.0 && v.x < 0.0)
+            if (c.origin.x + c.radius >= SCREEN_SIZE && v.x > 0.0)
+                || (c.origin.x - c.radius <= 0.0 && v.x < 0.0)
             {
                 v.x *= -1.0;
             }
-            if (c.y + CIRCLE_RADIUS >= SCREEN_SIZE && v.y > 0.0)
-                || (c.y - CIRCLE_RADIUS <= 0.0 && v.y < 0.0)
+            if (c.origin.y + c.radius >= SCREEN_SIZE && v.y > 0.0)
+                || (c.origin.y - c.radius <= 0.0 && v.y < 0.0)
             {
                 v.y *= -1.0;
             }
@@ -100,9 +105,11 @@ impl App {
                 let j = i + j;
                 let i = i - 1;
 
-                let sum_rad_sqr = (2.0 * CIRCLE_RADIUS).powi(2);
-                let dist = (c.x - other_c.x).powi(2) + (c.y - other_c.y).powi(2);
-                if dist <= sum_rad_sqr {
+                let sum_rad_sqr = (c.radius + other_c.radius).powi(2);
+                let dist = (c.origin.x - other_c.origin.x).powi(2)
+                    + (c.origin.y - other_c.origin.y).powi(2);
+                let diff = dist - sum_rad_sqr;
+                if diff < 0.0 {
                     let (first, second) = self.velocities.split_at_mut(i + 1);
                     let v = &mut first[first.len() - 1];
                     let other_v = &mut second[j - i - 1];
@@ -126,8 +133,10 @@ impl App {
         loop {
             let (c, v) = gen_circle(rng);
             let circle_already_there = self.circles.iter().any(|existing_c| {
-                let sum_rad = 2.0 * CIRCLE_RADIUS;
-                let dist = ((c.x - existing_c.x).powi(2) + (c.y - existing_c.y).powi(2)).sqrt();
+                let sum_rad = c.radius + existing_c.radius;
+                let dist = ((c.origin.x - existing_c.origin.x).powi(2)
+                    + (c.origin.y - existing_c.origin.y).powi(2))
+                .sqrt();
                 dist <= sum_rad
             });
             if !circle_already_there {
@@ -171,14 +180,18 @@ fn main() {
     }
 }
 
-fn gen_circle<R>(rng: &mut R) -> (Vector2D, Vector2D)
+fn gen_circle<R>(rng: &mut R) -> (Circle, Vector2D)
 where
     R: Rng,
 {
+    let radius = rng.gen_range(10.0..20.0);
     (
-        Vector2D {
-            x: rng.gen_range(CIRCLE_RADIUS..SCREEN_SIZE - CIRCLE_RADIUS),
-            y: rng.gen_range(CIRCLE_RADIUS..SCREEN_SIZE - CIRCLE_RADIUS),
+        Circle {
+            radius,
+            origin: Vector2D {
+                x: rng.gen_range(radius..SCREEN_SIZE - radius),
+                y: rng.gen_range(radius..SCREEN_SIZE - radius),
+            },
         },
         Vector2D {
             x: rng.gen_range(-100.0..100.0),
@@ -197,7 +210,7 @@ where
 /// 3. subtract the transferred momentum from the moving circle and add it to the other
 ///
 /// This currently assumes masses are equal.
-fn handle_collision(c: &Vector2D, other_c: &Vector2D, v: &mut Vector2D, other_v: &mut Vector2D) {
+fn handle_collision(c: &Circle, other_c: &Circle, v: &mut Vector2D, other_v: &mut Vector2D) {
     // Subtracting the velocities is like moving to an inertial reference frame where
     // one circle is stationary. This avoids having to calculate the transferred
     // momentum in both directions.
@@ -208,8 +221,8 @@ fn handle_collision(c: &Vector2D, other_c: &Vector2D, v: &mut Vector2D, other_v:
 
     // Get the vector between the centers. Momentum is transferred along this.
     let collision_vec = Vector2D {
-        x: c.x - other_c.x,
-        y: c.y - other_c.y,
+        x: c.origin.x - other_c.origin.x,
+        y: c.origin.y - other_c.origin.y,
     };
     let collision_len = collision_vec.calc_len();
 
@@ -261,9 +274,15 @@ mod tests {
 
     #[test]
     fn test_horizontal_collision_one_stopped() {
-        let c = Vector2D { x: 0.0, y: 0.0 };
+        let c = Circle {
+            radius: 10.0,
+            origin: Vector2D { x: 0.0, y: 0.0 },
+        };
         let mut v = Vector2D { x: 10.0, y: 0.0 };
-        let other_c = Vector2D { x: 1.0, y: 0.0 };
+        let other_c = Circle {
+            radius: 10.0,
+            origin: Vector2D { x: 1.0, y: 0.0 },
+        };
         let mut other_v = Vector2D { x: 0.0, y: 0.0 };
 
         handle_collision(&c, &other_c, &mut v, &mut other_v);
@@ -276,9 +295,15 @@ mod tests {
 
     #[test]
     fn test_horizontal_collision() {
-        let c = Vector2D { x: 0.0, y: 0.0 };
+        let c = Circle {
+            radius: 10.0,
+            origin: Vector2D { x: 0.0, y: 0.0 },
+        };
         let mut v = Vector2D { x: 10.0, y: 0.0 };
-        let other_c = Vector2D { x: 1.0, y: 0.0 };
+        let other_c = Circle {
+            radius: 10.0,
+            origin: Vector2D { x: 1.0, y: 0.0 },
+        };
         let mut other_v = Vector2D { x: -10.0, y: 0.0 };
 
         handle_collision(&c, &other_c, &mut v, &mut other_v);
@@ -291,9 +316,15 @@ mod tests {
 
     #[test]
     fn test_horizontal_offset_collision() {
-        let c = Vector2D { x: 0.0, y: 0.0 };
+        let c = Circle {
+            radius: 10.0,
+            origin: Vector2D { x: 0.0, y: 0.0 },
+        };
         let mut v = Vector2D { x: 10.0, y: 0.0 };
-        let other_c = Vector2D { x: 1.0, y: 1.0 };
+        let other_c = Circle {
+            radius: 10.0,
+            origin: Vector2D { x: 1.0, y: 1.0 },
+        };
         let mut other_v = Vector2D { x: -10.0, y: 0.0 };
 
         handle_collision(&c, &other_c, &mut v, &mut other_v);
@@ -306,9 +337,15 @@ mod tests {
 
     #[test]
     fn test_vertical_collision_one_stopped() {
-        let c = Vector2D { x: 0.0, y: 0.0 };
+        let c = Circle {
+            radius: 10.0,
+            origin: Vector2D { x: 0.0, y: 0.0 },
+        };
         let mut v = Vector2D { x: 0.0, y: 10.0 };
-        let other_c = Vector2D { x: 0.0, y: 10.0 };
+        let other_c = Circle {
+            radius: 10.0,
+            origin: Vector2D { x: 0.0, y: 10.0 },
+        };
         let mut other_v = Vector2D { x: 0.0, y: 0.0 };
 
         handle_collision(&c, &other_c, &mut v, &mut other_v);
@@ -321,9 +358,15 @@ mod tests {
 
     #[test]
     fn test_vertical_collision() {
-        let c = Vector2D { x: 0.0, y: 0.0 };
+        let c = Circle {
+            radius: 10.0,
+            origin: Vector2D { x: 0.0, y: 0.0 },
+        };
         let mut v = Vector2D { x: 0.0, y: 10.0 };
-        let other_c = Vector2D { x: 0.0, y: 10.0 };
+        let other_c = Circle {
+            radius: 10.0,
+            origin: Vector2D { x: 0.0, y: 10.0 },
+        };
         let mut other_v = Vector2D { x: 0.0, y: -10.0 };
 
         handle_collision(&c, &other_c, &mut v, &mut other_v);
@@ -336,9 +379,15 @@ mod tests {
 
     #[test]
     fn test_45_down_collision() {
-        let c = Vector2D { x: 0.0, y: 0.0 };
+        let c = Circle {
+            radius: 10.0,
+            origin: Vector2D { x: 0.0, y: 0.0 },
+        };
         let mut v = Vector2D { x: 10.0, y: 10.0 };
-        let other_c = Vector2D { x: 2.0, y: 0.0 };
+        let other_c = Circle {
+            radius: 10.0,
+            origin: Vector2D { x: 2.0, y: 0.0 },
+        };
         let mut other_v = Vector2D { x: -10.0, y: 10.0 };
 
         handle_collision(&c, &other_c, &mut v, &mut other_v);
@@ -351,9 +400,15 @@ mod tests {
 
     #[test]
     fn test_45_up_collision() {
-        let c = Vector2D { x: 0.0, y: 0.0 };
+        let c = Circle {
+            radius: 10.0,
+            origin: Vector2D { x: 0.0, y: 0.0 },
+        };
         let mut v = Vector2D { x: 10.0, y: -10.0 };
-        let other_c = Vector2D { x: 2.0, y: 0.0 };
+        let other_c = Circle {
+            radius: 10.0,
+            origin: Vector2D { x: 2.0, y: 0.0 },
+        };
         let mut other_v = Vector2D { x: -10.0, y: -10.0 };
 
         handle_collision(&c, &other_c, &mut v, &mut other_v);
