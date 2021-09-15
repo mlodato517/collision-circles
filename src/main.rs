@@ -105,6 +105,8 @@ impl App {
                 let j = i + j;
                 let i = i - 1;
 
+                // TODO Consider extracting this entire block or passing more information
+                // (`diff`, `delta_v`, `delta_v`, etc.) into more functions to reduce duplication.
                 let sum_rad_sqr = (c.radius + other_c.radius).powi(2);
                 let dist = (c.origin.x - other_c.origin.x).powi(2)
                     + (c.origin.y - other_c.origin.y).powi(2);
@@ -113,7 +115,13 @@ impl App {
                     let (first, second) = self.velocities.split_at_mut(i + 1);
                     let v = &mut first[first.len() - 1];
                     let other_v = &mut second[j - i - 1];
+
+                    let backup_time = handle_pre_collision(c, other_c, v, other_v);
                     handle_collision(c, other_c, v, other_v);
+                    c.origin.x += v.x * backup_time;
+                    c.origin.y += v.y * backup_time;
+                    other_c.origin.x += other_v.x * backup_time;
+                    other_c.origin.y += other_v.y * backup_time;
                 }
             }
         }
@@ -200,6 +208,66 @@ where
     )
 }
 
+/// Deals with reversing the two collided circles until they are _just_ touching (instead
+/// of, perhaps, overlapping a good big). This allows the velocity calculation to have the
+/// proper angle while also ensuring the balls don't get "stuck" together.
+///
+/// When reversing the circles we need to keep track of how much time we've reversed so that,
+/// after the collision takes place, we can play that time back. This ensures the circles are
+/// updated properly each `dt`.
+fn handle_pre_collision(
+    c: &mut Circle,
+    other_c: &mut Circle,
+    v: &Vector2D,
+    other_v: &Vector2D,
+) -> f64 {
+    // Move to reference frame where one circle is static.
+    let delta_v = Vector2D {
+        x: v.x - other_v.x,
+        y: v.y - other_v.y,
+    };
+    let delta_v_len = delta_v.calc_len();
+
+    // We imagine a triangle. One leg is `c1 - c2` and one leg is
+    // r1 + r2. A third leg of unknown size points in the
+    // direction of `v1 - v2` called `x`. If theta is the angle between `x`
+    // and `c1 - c2` then the law of cosines says:
+    //
+    // (r1+r2)^2 = c_len^2 + x_len^2 - 2*c_len*x_len*cos(theta)
+    //
+    // Where `c_len` is the length of `c1-c2`. Solving for x using the quadratic formula gives:
+    //
+    // x = c_len*cos(theta) - sqrt((c_len*cos(theta))^2 - (c_len^2 - (r1+r2)^2))
+    //
+    // We'll affectionally call c_len*cos(theta) "c_theta"
+    // and x "backup_len" because it's how far we have to reverse.
+    let delta_c = Vector2D {
+        x: c.origin.x - other_c.origin.x,
+        y: c.origin.y - other_c.origin.y,
+    };
+    let diff = delta_c.x.powi(2) + delta_c.y.powi(2) - (c.radius + other_c.radius).powi(2);
+    let c_theta = delta_v.dot(&delta_c) / delta_v_len;
+
+    let backup_len = c_theta + (c_theta.powi(2) - diff).sqrt();
+    let backup_time = backup_len / delta_v_len;
+
+    c.origin.x -= v.x * backup_time;
+    c.origin.y -= v.y * backup_time;
+
+    other_c.origin.x -= other_v.x * backup_time;
+    other_c.origin.y -= other_v.y * backup_time;
+
+    // In debug mode assert the radiuses _just_ touch.
+    debug_assert!(
+        ((c.origin.x - other_c.origin.x).powi(2) + (c.origin.y - other_c.origin.y).powi(2)
+            - (c.radius + other_c.radius).powi(2))
+        .abs()
+            < 1.0e-10
+    );
+
+    backup_time
+}
+
 /// Updates the velocities of two colliding circles.
 /// Credit for this algorithm goes to Brian Smith.
 ///
@@ -261,7 +329,7 @@ mod tests {
     use super::*;
 
     macro_rules! assert_close {
-        ($f1:expr, $f2:literal) => {
+        ($f1:expr, $f2:expr) => {
             assert!(
                 ($f1 - $f2).abs() <= 1.0e-10,
                 "{}({:.2}) - {}",
@@ -272,150 +340,283 @@ mod tests {
         };
     }
 
-    #[test]
-    fn test_horizontal_collision_one_stopped() {
-        let c = Circle {
-            radius: 10.0,
-            origin: Vector2D { x: 0.0, y: 0.0 },
-        };
-        let mut v = Vector2D { x: 10.0, y: 0.0 };
-        let other_c = Circle {
-            radius: 10.0,
-            origin: Vector2D { x: 1.0, y: 0.0 },
-        };
-        let mut other_v = Vector2D { x: 0.0, y: 0.0 };
+    mod handle_collision {
+        use super::*;
+        #[test]
+        fn test_horizontal_collision_one_stopped() {
+            let c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 0.0, y: 0.0 },
+            };
+            let mut v = Vector2D { x: 10.0, y: 0.0 };
+            let other_c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 1.0, y: 0.0 },
+            };
+            let mut other_v = Vector2D { x: 0.0, y: 0.0 };
 
-        handle_collision(&c, &other_c, &mut v, &mut other_v);
-        assert_close!(v.x, 0.0);
-        assert_close!(v.y, 0.0);
+            handle_collision(&c, &other_c, &mut v, &mut other_v);
+            assert_close!(v.x, 0.0);
+            assert_close!(v.y, 0.0);
 
-        assert_close!(other_v.x, 10.0);
-        assert_close!(other_v.y, 0.0);
+            assert_close!(other_v.x, 10.0);
+            assert_close!(other_v.y, 0.0);
+        }
+
+        #[test]
+        fn test_horizontal_collision() {
+            let c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 0.0, y: 0.0 },
+            };
+            let mut v = Vector2D { x: 10.0, y: 0.0 };
+            let other_c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 1.0, y: 0.0 },
+            };
+            let mut other_v = Vector2D { x: -10.0, y: 0.0 };
+
+            handle_collision(&c, &other_c, &mut v, &mut other_v);
+            assert_close!(v.x, -10.0);
+            assert_close!(v.y, 0.0);
+
+            assert_close!(other_v.x, 10.0);
+            assert_close!(other_v.y, 0.0);
+        }
+
+        #[test]
+        fn test_horizontal_offset_collision() {
+            let c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 0.0, y: 0.0 },
+            };
+            let mut v = Vector2D { x: 10.0, y: 0.0 };
+            let other_c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 1.0, y: 1.0 },
+            };
+            let mut other_v = Vector2D { x: -10.0, y: 0.0 };
+
+            handle_collision(&c, &other_c, &mut v, &mut other_v);
+            assert_close!(v.x, 0.0);
+            assert_close!(v.y, -10.0);
+
+            assert_close!(other_v.x, 0.0);
+            assert_close!(other_v.y, 10.0);
+        }
+
+        #[test]
+        fn test_vertical_collision_one_stopped() {
+            let c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 0.0, y: 0.0 },
+            };
+            let mut v = Vector2D { x: 0.0, y: 10.0 };
+            let other_c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 0.0, y: 10.0 },
+            };
+            let mut other_v = Vector2D { x: 0.0, y: 0.0 };
+
+            handle_collision(&c, &other_c, &mut v, &mut other_v);
+            assert_close!(v.x, 0.0);
+            assert_close!(v.y, 0.0);
+
+            assert_close!(other_v.x, 0.0);
+            assert_close!(other_v.y, 10.0);
+        }
+
+        #[test]
+        fn test_vertical_collision() {
+            let c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 0.0, y: 0.0 },
+            };
+            let mut v = Vector2D { x: 0.0, y: 10.0 };
+            let other_c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 0.0, y: 10.0 },
+            };
+            let mut other_v = Vector2D { x: 0.0, y: -10.0 };
+
+            handle_collision(&c, &other_c, &mut v, &mut other_v);
+            assert_close!(v.x, 0.0);
+            assert_close!(v.y, -10.0);
+
+            assert_close!(other_v.x, 0.0);
+            assert_close!(other_v.y, 10.0);
+        }
+
+        #[test]
+        fn test_45_down_collision() {
+            let c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 0.0, y: 0.0 },
+            };
+            let mut v = Vector2D { x: 10.0, y: 10.0 };
+            let other_c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 2.0, y: 0.0 },
+            };
+            let mut other_v = Vector2D { x: -10.0, y: 10.0 };
+
+            handle_collision(&c, &other_c, &mut v, &mut other_v);
+            assert_close!(v.x, -10.0);
+            assert_close!(v.y, 10.0);
+
+            assert_close!(other_v.x, 10.0);
+            assert_close!(other_v.y, 10.0);
+        }
+
+        #[test]
+        fn test_45_up_collision() {
+            let c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 0.0, y: 0.0 },
+            };
+            let mut v = Vector2D { x: 10.0, y: -10.0 };
+            let other_c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 2.0, y: 0.0 },
+            };
+            let mut other_v = Vector2D { x: -10.0, y: -10.0 };
+
+            handle_collision(&c, &other_c, &mut v, &mut other_v);
+            assert_close!(v.x, -10.0);
+            assert_close!(v.y, -10.0);
+
+            assert_close!(other_v.x, 10.0);
+            assert_close!(other_v.y, -10.0);
+        }
     }
 
-    #[test]
-    fn test_horizontal_collision() {
-        let c = Circle {
-            radius: 10.0,
-            origin: Vector2D { x: 0.0, y: 0.0 },
-        };
-        let mut v = Vector2D { x: 10.0, y: 0.0 };
-        let other_c = Circle {
-            radius: 10.0,
-            origin: Vector2D { x: 1.0, y: 0.0 },
-        };
-        let mut other_v = Vector2D { x: -10.0, y: 0.0 };
+    mod handle_pre_collision {
+        use super::*;
 
-        handle_collision(&c, &other_c, &mut v, &mut other_v);
-        assert_close!(v.x, -10.0);
-        assert_close!(v.y, 0.0);
+        #[test]
+        fn test_horizontal_pre_collision_one_stopped() {
+            let mut c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 0.0, y: 0.0 },
+            };
+            let v = Vector2D { x: 10.0, y: 0.0 };
+            let mut other_c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 10.0, y: 0.0 },
+            };
+            let other_v = Vector2D { x: 0.0, y: 0.0 };
 
-        assert_close!(other_v.x, 10.0);
-        assert_close!(other_v.y, 0.0);
-    }
+            handle_pre_collision(&mut c, &mut other_c, &v, &other_v);
+            assert_close!(c.origin.x, -10.0);
+            assert_close!(c.origin.y, 0.0);
 
-    #[test]
-    fn test_horizontal_offset_collision() {
-        let c = Circle {
-            radius: 10.0,
-            origin: Vector2D { x: 0.0, y: 0.0 },
-        };
-        let mut v = Vector2D { x: 10.0, y: 0.0 };
-        let other_c = Circle {
-            radius: 10.0,
-            origin: Vector2D { x: 1.0, y: 1.0 },
-        };
-        let mut other_v = Vector2D { x: -10.0, y: 0.0 };
+            assert_close!(other_c.origin.x, 10.0);
+            assert_close!(other_c.origin.y, 0.0);
+        }
 
-        handle_collision(&c, &other_c, &mut v, &mut other_v);
-        assert_close!(v.x, 0.0);
-        assert_close!(v.y, -10.0);
+        #[test]
+        fn test_horizontal_pre_collision() {
+            let mut c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 0.0, y: 0.0 },
+            };
+            let v = Vector2D { x: 10.0, y: 0.0 };
+            let mut other_c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 10.0, y: 0.0 },
+            };
+            let other_v = Vector2D { x: -10.0, y: 0.0 };
 
-        assert_close!(other_v.x, 0.0);
-        assert_close!(other_v.y, 10.0);
-    }
+            handle_pre_collision(&mut c, &mut other_c, &v, &other_v);
+            assert_close!(c.origin.x, -5.0);
+            assert_close!(c.origin.y, 0.0);
 
-    #[test]
-    fn test_vertical_collision_one_stopped() {
-        let c = Circle {
-            radius: 10.0,
-            origin: Vector2D { x: 0.0, y: 0.0 },
-        };
-        let mut v = Vector2D { x: 0.0, y: 10.0 };
-        let other_c = Circle {
-            radius: 10.0,
-            origin: Vector2D { x: 0.0, y: 10.0 },
-        };
-        let mut other_v = Vector2D { x: 0.0, y: 0.0 };
+            assert_close!(other_c.origin.x, 15.0);
+            assert_close!(other_c.origin.y, 0.0);
+        }
 
-        handle_collision(&c, &other_c, &mut v, &mut other_v);
-        assert_close!(v.x, 0.0);
-        assert_close!(v.y, 0.0);
+        #[test]
+        fn test_vertical_pre_collision_one_stopped() {
+            let mut c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 0.0, y: 0.0 },
+            };
+            let v = Vector2D { x: 0.0, y: 10.0 };
+            let mut other_c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 0.0, y: 10.0 },
+            };
+            let other_v = Vector2D { x: 0.0, y: 0.0 };
 
-        assert_close!(other_v.x, 0.0);
-        assert_close!(other_v.y, 10.0);
-    }
+            handle_pre_collision(&mut c, &mut other_c, &v, &other_v);
+            assert_close!(c.origin.x, 0.0);
+            assert_close!(c.origin.y, -10.0);
 
-    #[test]
-    fn test_vertical_collision() {
-        let c = Circle {
-            radius: 10.0,
-            origin: Vector2D { x: 0.0, y: 0.0 },
-        };
-        let mut v = Vector2D { x: 0.0, y: 10.0 };
-        let other_c = Circle {
-            radius: 10.0,
-            origin: Vector2D { x: 0.0, y: 10.0 },
-        };
-        let mut other_v = Vector2D { x: 0.0, y: -10.0 };
+            assert_close!(other_c.origin.x, 0.0);
+            assert_close!(other_c.origin.y, 10.0);
+        }
 
-        handle_collision(&c, &other_c, &mut v, &mut other_v);
-        assert_close!(v.x, 0.0);
-        assert_close!(v.y, -10.0);
+        #[test]
+        fn test_horizontal_pre_collision_with_vertical_velocity() {
+            let mut c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 0.0, y: 0.0 },
+            };
+            let v = Vector2D { x: 0.0, y: 10.0 };
+            let mut other_c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 10.0, y: 0.0 },
+            };
+            let other_v = Vector2D { x: 0.0, y: 0.0 };
 
-        assert_close!(other_v.x, 0.0);
-        assert_close!(other_v.y, 10.0);
-    }
+            handle_pre_collision(&mut c, &mut other_c, &v, &other_v);
+            assert_close!(c.origin.x, 0.0);
+            assert_close!(c.origin.y, -10.0 * 3.0f64.sqrt());
 
-    #[test]
-    fn test_45_down_collision() {
-        let c = Circle {
-            radius: 10.0,
-            origin: Vector2D { x: 0.0, y: 0.0 },
-        };
-        let mut v = Vector2D { x: 10.0, y: 10.0 };
-        let other_c = Circle {
-            radius: 10.0,
-            origin: Vector2D { x: 2.0, y: 0.0 },
-        };
-        let mut other_v = Vector2D { x: -10.0, y: 10.0 };
+            assert_close!(other_c.origin.x, 10.0);
+            assert_close!(other_c.origin.y, 0.0);
+        }
 
-        handle_collision(&c, &other_c, &mut v, &mut other_v);
-        assert_close!(v.x, -10.0);
-        assert_close!(v.y, 10.0);
+        #[test]
+        fn test_horizontal_pre_collision_one_stopped_past_center() {
+            let mut c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 11.0, y: 0.0 },
+            };
+            let v = Vector2D { x: 10.0, y: 0.0 };
+            let mut other_c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 10.0, y: 0.0 },
+            };
+            let other_v = Vector2D { x: 0.0, y: 0.0 };
 
-        assert_close!(other_v.x, 10.0);
-        assert_close!(other_v.y, 10.0);
-    }
+            handle_pre_collision(&mut c, &mut other_c, &v, &other_v);
+            assert_close!(c.origin.x, -10.0);
+            assert_close!(c.origin.y, 0.0);
 
-    #[test]
-    fn test_45_up_collision() {
-        let c = Circle {
-            radius: 10.0,
-            origin: Vector2D { x: 0.0, y: 0.0 },
-        };
-        let mut v = Vector2D { x: 10.0, y: -10.0 };
-        let other_c = Circle {
-            radius: 10.0,
-            origin: Vector2D { x: 2.0, y: 0.0 },
-        };
-        let mut other_v = Vector2D { x: -10.0, y: -10.0 };
+            assert_close!(other_c.origin.x, 10.0);
+            assert_close!(other_c.origin.y, 0.0);
+        }
 
-        handle_collision(&c, &other_c, &mut v, &mut other_v);
-        assert_close!(v.x, -10.0);
-        assert_close!(v.y, -10.0);
+        #[test]
+        fn test_horizontal_pre_collision_one_stopped_past_center_backward() {
+            let mut c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 11.0, y: 0.0 },
+            };
+            let v = Vector2D { x: -10.0, y: 0.0 };
+            let mut other_c = Circle {
+                radius: 10.0,
+                origin: Vector2D { x: 10.0, y: 0.0 },
+            };
+            let other_v = Vector2D { x: 0.0, y: 0.0 };
 
-        assert_close!(other_v.x, 10.0);
-        assert_close!(other_v.y, -10.0);
+            handle_pre_collision(&mut c, &mut other_c, &v, &other_v);
+            assert_close!(c.origin.x, 30.0);
+            assert_close!(c.origin.y, 0.0);
+
+            assert_close!(other_c.origin.x, 10.0);
+            assert_close!(other_c.origin.y, 0.0);
+        }
     }
 }
