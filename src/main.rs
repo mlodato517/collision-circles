@@ -139,7 +139,8 @@ impl App {
         R: Rng,
     {
         loop {
-            let (c, v) = gen_circle(rng);
+            let c = gen_circle(rng);
+            let v = gen_velocity(rng);
             let circle_already_there = self.circles.iter().any(|existing_c| {
                 let sum_rad = c.radius + existing_c.radius;
                 let dist = ((c.origin.x - existing_c.origin.x).powi(2)
@@ -188,24 +189,30 @@ fn main() {
     }
 }
 
-fn gen_circle<R>(rng: &mut R) -> (Circle, Vector2D)
+/// Generates a random circle with a random radius somewhere on the screen.
+fn gen_circle<R>(rng: &mut R) -> Circle
 where
     R: Rng,
 {
     let radius = rng.gen_range(10.0..20.0);
-    (
-        Circle {
-            radius,
-            origin: Vector2D {
-                x: rng.gen_range(radius..SCREEN_SIZE - radius),
-                y: rng.gen_range(radius..SCREEN_SIZE - radius),
-            },
+    Circle {
+        radius,
+        origin: Vector2D {
+            x: rng.gen_range(radius..SCREEN_SIZE - radius),
+            y: rng.gen_range(radius..SCREEN_SIZE - radius),
         },
-        Vector2D {
-            x: rng.gen_range(-100.0..100.0),
-            y: rng.gen_range(-100.0..100.0),
-        },
-    )
+    }
+}
+
+/// Generates a random velocity vector.
+fn gen_velocity<R>(rng: &mut R) -> Vector2D
+where
+    R: Rng,
+{
+    Vector2D {
+        x: rng.gen_range(-100.0..100.0),
+        y: rng.gen_range(-100.0..100.0),
+    }
 }
 
 /// Deals with reversing the two collided circles until they are _just_ touching (instead
